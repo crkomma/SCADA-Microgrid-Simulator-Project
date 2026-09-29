@@ -13,7 +13,7 @@ Here’s everything I used on my breadboard for this first phase:
 
 * **1x Elegoo Uno** (ATmega328P microcontroller board)
 * **1x 10kΩ Potentiometer** (My simulated "Solar Input" knob)
-* **3x LEDs** (Green = Normal, Yellow = High Load Warning, Red = Overvoltage/Trip)
+* **4x LEDs** (Green = Normal, Yellow = High Load Warning, Red = Over Voltage, White = Relay Trip)
 * **3x 330Ω Resistors** (To prevent burning out the LEDs!)
 * Solderless breadboard & some jumper wires
 
