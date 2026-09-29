@@ -13,9 +13,17 @@ Here’s everything I used on my breadboard for this first phase:
 
 * **1x Elegoo Uno** (ATmega328P microcontroller board)
 * **1x 10kΩ Potentiometer** (My simulated "Solar Input" knob)
-* **4x LEDs** (Green = Normal, Yellow = High Load Warning, Red = Over Voltage, White = Relay Trip)
+* **4x LEDs** (Green = Normal, Yellow = High Load Warning, Red = Over Voltage, White = Relay Trip Interlock)
 * **4x 330Ω Resistors** (To prevent burning out the LEDs!)
 * Solderless breadboard & some jumper wires
+
+### Hardware Iteration & Architecture Upgrade
+
+Initially, I built the control room using just 3 LEDs (Green, Yellow, and Red) to represent low, medium, and high voltage states. However, I quickly realized a design flaw: **a Red LED alone only tells you that the voltage is high, not whether the system actively reacted to it.**
+
+To fix this ambiguity, I added a **4th (White) LED on Digital Pin 11.** This acts as a simulated physical **Relay Safety Interlock.** Now, the system explicitly differentiates between:
+1. **Red LED:** High-voltage condition detected ($\ge 3.67\text{V}$).
+2. **White LED:** Active hardware relay actuation (tripping the physical grid connection to isolate the fault).
 
 ### How I Wired It (Pin Map)
 
@@ -24,7 +32,8 @@ Here’s everything I used on my breadboard for this first phase:
 | **Potentiometer Signal Pin** | Analog Pin `A0` | Sends variable analog voltage ($0\text{V} - 5\text{V}$) |
 | **Green LED (Long leg)** | Digital Pin `8` | Lights up when solar input is low/stable |
 | **Yellow LED (Long leg)** | Digital Pin `9` | Lights up when input hits medium warning levels |
-| **Red LED (Long leg)** | Digital Pin `10` | Lights up on high input/trip risk |
+| **Red LED (Long leg)** | Digital Pin `10` | Lights up on dangerously high voltage input |
+| **White LED (Long Leg)** | Digital Pin `11` | Lights up when high voltage trips safety relay |
 | **Short Legs of LEDs** | Breadboard (-) Rail | Bleeds off to GND via $330\,\Omega$ resistors |
 
 ---
@@ -33,63 +42,84 @@ Here’s everything I used on my breadboard for this first phase:
 
 The microcontroller uses a 10-bit Analog-to-Digital Converter (ADC). That means it converts the $0\text{V} - 5\text{V}$ coming off the potentiometer into a raw integer between `0` and `1023`. 
 
-I wrote a quick C program to convert that raw number back into an estimated voltage, stream it live to the computer screen via Serial Monitor, and switch the LEDs:
+I wrote a quick C program to convert that raw number back into an estimated voltage, stream it live to the computer screen via Serial Monitor, and drive the LEDs and interlock logic:
 
 ```cpp
 /*
-  Microgrid Control Room - Hardware Test
-  Reads Analog Pin A0 (Solar Dial) and triggers status LEDs based on input level.
+  Microgrid HIL Testbed - Phase 3 Firmware
+  Reads A0 (Solar Dial), updates status LEDs, actuates Pin 11 Safety Interlock,
+  and streams structured UART telemetry to the Python SCADA host.
 */
 
+// Define Pin Assignments
 const int SOLAR_DIAL_PIN = A0;
-const int GREEN_LED      = 8;  // Normal
-const int YELLOW_LED     = 9;  // Warning
-const int RED_LED        = 10; // Fault / Trip
+const int GREEN_LED      = 8;  // Normal Grid State
+const int YELLOW_LED     = 9;  // Load Shedding / Warning
+const int RED_LED        = 10; // Grid Trip / Fault
+const int RELAY_TRIP_PIN = 11; // Hardware Safety Interlock Switch
+
+// Operational Thresholds (Raw ADC 0 - 1023)
+const int THRESHOLD_WARN = 350; // ~1.71 V
+const int THRESHOLD_TRIP = 750; // ~3.67 V
 
 void setup() {
-  // Start serial communication at 9600 baud rate
+  // Initialize Serial Communication at 9600 baud
   Serial.begin(9600);
   
-  // Set LED pins as outputs
+  // Set LED pins as digital outputs
   pinMode(GREEN_LED, OUTPUT);
   pinMode(YELLOW_LED, OUTPUT);
   pinMode(RED_LED, OUTPUT);
+  pinMode(RELAY_TRIP_PIN, OUTPUT);
+
+  digitalWrite(RELAY_TRIP_PIN, LOW);
   
-  Serial.println("--- MICROGRID TELEMETRY INITIALIZED ---");
+  Serial.println("--- PHASE 3 MICROGRID CONTROLLER INITIALIZED ---");
 }
 
 void loop() {
-  // Read raw 10-bit value (0 - 1023)
+  // Read the raw analog value (0 to 1023)
   int rawValue = analogRead(SOLAR_DIAL_PIN);
   
-  // Math: Convert raw reading to actual voltage
+  // Convert raw reading to voltage (0.0V to 5.0V)
   float voltage = rawValue * (5.0 / 1023.0);
   
-  // Print telemetry data to screen
+  // Print telemetry to Serial Monitor
   Serial.print("Solar Input Raw: ");
   Serial.print(rawValue);
   Serial.print(" | Voltage: ");
   Serial.print(voltage, 2);
   Serial.println(" V");
 
-  // Simple state logic for alert LEDs
-  if (rawValue < 350) {
+  // --- STATE CONTROL & INTERLOCK LOGIC
+
+  // 1. NORMAL STATE (< 1.71V)
+  if (rawValue < THRESHOLD_WARN) {
     digitalWrite(GREEN_LED, HIGH);
     digitalWrite(YELLOW_LED, LOW);
     digitalWrite(RED_LED, LOW);
+    digitalWrite(RELAY_TRIP_PIN, LOW); // Grid connected / Relay normal
+    Serial.println(" V | STATUS: NORMAL");
   } 
-  else if (rawValue >= 350 && rawValue < 750) {
+  // 2. WARNING STATE (1.71V to 3.66V)
+  else if (rawValue >= THRESHOLD_WARN && rawValue < THRESHOLD_TRIP) {
     digitalWrite(GREEN_LED, LOW);
     digitalWrite(YELLOW_LED, HIGH);
     digitalWrite(RED_LED, LOW);
+    digitalWrite(RELAY_TRIP_PIN, LOW); // Grid connected / Relay normal
+    Serial.println(" V | STATUS: WARNING");
   } 
+  // 3. FAULT / TRIP STATE (>= 3.67V)
   else {
     digitalWrite(GREEN_LED, LOW);
     digitalWrite(YELLOW_LED, LOW);
     digitalWrite(RED_LED, HIGH);
+    digitalWrite(RELAY_TRIP_PIN, HIGH); // ISOLATE GRID - Actuate Pin 11 Trip
+    Serial.println(" V | STATUS: FAULT_TRIP");
   }
   
-  delay(150); // Short delay to keep the serial stream readable
+  // 100ms delay gives a 10 Hz sampling rate for logging
+  delay(300);
 }
 ```
 **Challenges, Debugging, and What I Learned**
@@ -98,6 +128,7 @@ Building this wasn't super easy. It was definitely a learning process with a few
 * **Short Circuit:** When I first plugged in my Ground jumper wire, the power light on the microcontroller turned off completely. After some research and pin repositioning, turns out the potentiometer pins were jammed into the same row on the breadboard, which bridged the 5V power straight into Ground, therefore tripping the board's safety fuse.
 * **Analog vs. Digital Headers:** I accidentally plugged in the LED control wires into the Analog header side of the microcontroller instead of Digital Pins 8, 9, and 10. I moved them over and fixed the short circuit (again) which got the LEDs responding instantly.
 * **Potentiometer Fit:** Since I had a trimpot potentiometer, the legs on it were a little thick; When I plugged a wire in the exact hole next to them, it popped the component right out. To fix this, I spaced the wire out a couple columns over in the same row.
+* **Signal Differentiation (Adding the White LED):** As mentioned above, relying solely on 3 LEDs made it hard to confirm if the hardware safety command actually fired. Adding the White LED to Pin 11 cleanly separated the *fault status* (Red LED) from the *actuation trip signal* (White LED).
 
 **Results: Testing**
 
@@ -107,12 +138,12 @@ Once all the wiring and positioning issues were fixed, opening the Serial Monito
 --- MICROGRID TELEMETRY INITIALIZED ---
 Solar Input Raw: 110 | Voltage: 0.54 V --> [Green LED ON]
 Solar Input Raw: 520 | Voltage: 2.54 V --> [Yellow LED ON]
-Solar Input Raw: 890 | Voltage: 4.35 V --> [Red LED ON]
+Solar Input Raw: 890 | Voltage: 4.35 V --> [Red LED ON + White Relay LED TRIPPED]
 ```
 
 # Phase 2: Host Python SCADA Pipeline & Real-Time Visualization
 
-Now that the local microcontroller handles real-time edge execution (reading ADC inputs and driving status LEDs), Phase 2 expands the testbed into a true Supervisory Control and Data Acquisition (SCADA) system. 
+Now that the local microcontroller handles real-time edge execution (reading ADC inputs, driving status LEDs, and actuating the relay trip), Phase 2 expands the testbed into a true Supervisory Control and Data Acquisition (SCADA) system. 
 
 Using Python on a host PC, the system reads ASCII data streams over the USB serial interface (`COM3` @ 9600 baud), parses raw telemetry into structured numbers, logs timestamped data to disk, and visualizes system state in a real-time dashboard.
 
